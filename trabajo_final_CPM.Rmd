@@ -1,0 +1,373 @@
+---
+title: "Análisis Epidemiológico ENSSEX - Predicción de Depresión"
+author: "Pablo Cabello, Cristobal Pineda y Felipe Carrasco"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: true
+    toc_depth: 2
+---
+
+## 0. Introducción
+
+```{r introduccion, echo=FALSE}
+output1 <- c(
+  "\n Contexto General:",
+  "\n- Los análisis realizados se basan en los datos obtenidos de la Encuesta Nacional de Salud, Sexualidad y Género (ENSSEX) 2022-2023.",
+  "\n- La base de datos ENSSEX 2022-2023 es una encuesta poblacional de 20.392 casos considerando un muestreo probabilístico a nivel nacional y regional de la población chilena de 18 años y más, con el objetivo de conocer las características de salud, sexualidad y género de la población de 18 años y más, residente en Chile, con representatividad nacional, regional, por tramos de edad y sexo, para la producción de evidencia científica dirigida al diseño, implementación y evaluación de políticas públicas afines.",
+  
+  "\n Selección y descripción de la variable dependiente:",
+  "\n1. Variable Dependiente: 'Depresión'",
+
+  "\n Selección y descripción de las variables independientes:",
+  "\n- Variables Categóricas:",
+  "\n  1. Sexo al nacer:",
+  "\n  2. Nivel educativo:",
+  "\n  3. Bienestar emocional (escala del 1 al 7):",
+  "\n  4. Calidad de vida percibida:",
+  "\n  5. Satisfacción aspecto físico:",
+  "\n  6. Consumo de alcohol (en los últimos 30 días):",
+  "\n  7. Drogas inyectables:",
+  "\n- Variables Numéricas:",
+  "\n  8. Edad (en años):",
+  "\n  9. Peso (en kg):",
+  "\n  10. Talla (en metros):"
+)
+
+cat(output1, sep = "\n")
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = 'center',
+  out.width = '100%'
+)
+
+# Instalar y cargar paquetes necesarios
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+    dplyr,        # Para manipulación de datos
+    ggplot2,      # Para visualización
+    tidyr,        # Para limpieza de datos
+    stats,        # Para análisis estadístico
+    rpart,        # Para árbol de decisión
+    MASS,         # Para regresión logística
+    caret,        # Para machine learning
+    randomForest, # Para random forest
+    pROC,         # Para curvas ROC
+    haven,        # Para manejo de datos SPSS/STATA
+    mice,         # Para imputación de datos
+    themis,       # Para balanceo de clases
+    DMwR         # Para SMOTE
+)
+```
+
+## 1. Carga de Paquetes y Datos
+
+```{r cargar_datos}
+# Cargar datos
+load('20240516_enssex_data.rdata')
+```
+
+## 2. Preparación de Datos
+
+```{r preparar_datos}
+# Crear y limpiar variables
+datos <- enssex4 %>%
+    mutate(
+        # Variable dependiente: convertir a factor y manejar valores faltantes
+        depresion = factor(ifelse(!is.na(zap_labels(i_3_p9)) & zap_labels(i_3_p9) %in% c(1,2), 
+                                 ifelse(zap_labels(i_3_p9) == 1, "Si", "No"), NA)),
+        
+        # Variables categóricas con manejo de NA
+        sexo_al_nacer = factor(ifelse(!is.na(zap_labels(p1)) & zap_labels(p1) %in% c(1,2),
+                                     ifelse(zap_labels(p1) == 1, "Hombre", "Mujer"), NA)),
+        
+        nivel_educacional = factor(ifelse(!is.na(zap_labels(p5)), 
+                                        as.character(as_factor(p5)), NA)),
+        
+        bienestar_emocional = factor(ifelse(!is.na(zap_labels(i_2_p9)), 
+                                          as.character(as_factor(i_2_p9)), NA)),
+        
+        calidad_vida_percibida = factor(ifelse(!is.na(zap_labels(p8)), 
+                                             as.character(as_factor(p8)), NA)),
+        
+        satisfaccion_aspecto_fisico = factor(ifelse(!is.na(zap_labels(i_1_p24)), 
+                                                  as.character(as_factor(i_1_p24)), NA)),
+        
+        drogas_inyectables = factor(ifelse(!is.na(zap_labels(i_3_p25)) & zap_labels(i_3_p25) %in% c(1,2), 
+                                         ifelse(zap_labels(i_3_p25) == 1, "Si", "No"), NA)),
+        
+        consumo_alcohol = factor(ifelse(!is.na(zap_labels(i_5_p26)), 
+                                     as.character(as_factor(i_5_p26)), NA)),
+        
+        # Variables numéricas con validación
+        edad = as.numeric(ifelse(!is.na(zap_labels(p4)) & zap_labels(p4) >= 18 & zap_labels(p4) <= 100, 
+                                zap_labels(p4), NA)),
+        
+        peso = as.numeric(ifelse(!is.na(zap_labels(p22)) & zap_labels(p22) >= 30 & zap_labels(p22) <= 200, 
+                                zap_labels(p22), NA)),
+        
+        talla = as.numeric(ifelse(!is.na(zap_labels(p23)) & zap_labels(p23) >= 130 & zap_labels(p23) <= 210, 
+                                 zap_labels(p23)/100, NA))  # Convertir a metros
+    ) %>%
+    # Filtrar filas con datos válidos en variables clave
+    filter(!is.na(depresion))
+
+# Análisis de datos faltantes
+na_summary <- colSums(is.na(datos)) / nrow(datos) * 100
+print("Porcentaje de datos faltantes por variable:")
+print(na_summary[c("depresion", "sexo_al_nacer", "edad", "peso", "talla", 
+                   "drogas_inyectables", "consumo_alcohol")])
+```
+
+## 3. Análisis Descriptivo
+
+```{r analisis_descriptivo}
+## 3. Análisis Descriptivo
+
+# Variables categóricas de interés
+vars_cat <- c("depresion", "sexo_al_nacer", "nivel_educacional", "bienestar_emocional", 
+              "calidad_vida_percibida", "satisfaccion_aspecto_fisico", 
+              "drogas_inyectables", "consumo_alcohol")
+
+# Variables numéricas de interés
+vars_num <- c("edad", "peso", "talla")
+
+# Análisis de frecuencias absolutas y relativas para variables categóricas
+for (var in vars_cat) {
+    cat("\n-------------------------------\n")
+    cat("Análisis de frecuencias para:", var, "\n")
+    
+    # Frecuencia absoluta
+    tabla_abs <- table(datos[[var]])
+    cat("Frecuencias absolutas:\n")
+    print(tabla_abs)
+    
+    # Frecuencia relativa
+    tabla_rel <- prop.table(tabla_abs) * 100
+    cat("Frecuencias relativas (%):\n")
+    print(round(tabla_rel, 2))
+}
+
+# Análisis descriptivo para variables numéricas
+cat("\n-------------------------------\n")
+cat("Análisis descriptivo para variables numéricas\n")
+for (var in vars_num) {
+    cat("\n-------------------------------\n")
+    cat("Variable:", var, "\n")
+    
+    # Resumen de estadísticas descriptivas
+    media <- mean(datos[[var]], na.rm = TRUE)
+    mediana <- median(datos[[var]], na.rm = TRUE)
+    minimo <- min(datos[[var]], na.rm = TRUE)
+    maximo <- max(datos[[var]], na.rm = TRUE)
+    
+    cat("Media:", round(media, 2), "\n")
+    cat("Mediana:", round(mediana, 2), "\n")
+    cat("Mínimo:", round(minimo, 2), "\n")
+    cat("Máximo:", round(maximo, 2), "\n")
+}
+
+
+```
+
+## 5. Modelado Predictivo
+
+```{r modelado}
+# Cargar librería adicional para imputación
+if (!require("glmnet")) install.packages("glmnet")
+if (!require("mice")) install.packages("mice")
+library(mice)
+
+# Preparar datos para modelado
+variables_seleccionadas <- c("depresion", "sexo_al_nacer", "edad", "peso", "talla", 
+                            "nivel_educacional", "bienestar_emocional", "calidad_vida_percibida",
+                            "satisfaccion_aspecto_fisico", "drogas_inyectables", "consumo_alcohol")
+
+datos_modelo <- datos %>%
+    dplyr::select(all_of(variables_seleccionadas))
+
+# Verificar el desbalance inicial
+print("Distribución inicial de clases:")
+print(table(datos_modelo$depresion))
+
+# Imputación de datos faltantes
+# Primero convertimos factores a numéricos para la imputación
+datos_numericos <- datos_modelo %>%
+    mutate(across(where(is.factor), as.numeric))
+
+# Realizar imputación
+imp <- mice(datos_numericos, m=5, maxit=50, method='pmm', seed=123)
+datos_imputados <- complete(imp)
+
+# Convertir de nuevo a factores las variables categóricas
+datos_modelo_completo <- datos_imputados %>%
+    mutate(
+        depresion = factor(depresion, levels=c(1,2), labels=c("Si", "No")),
+        sexo_al_nacer = factor(sexo_al_nacer, levels=c(1,2), labels=c("Hombre", "Mujer")),
+        nivel_educacional = factor(nivel_educacional),
+        bienestar_emocional = factor(bienestar_emocional),
+        calidad_vida_percibida = factor(calidad_vida_percibida),
+        satisfaccion_aspecto_fisico = factor(satisfaccion_aspecto_fisico),
+        drogas_inyectables = factor(drogas_inyectables, levels=c(1,2), labels=c("Si", "No")),
+        consumo_alcohol = factor(consumo_alcohol)
+    )
+
+# Dividir en conjunto de entrenamiento y prueba
+set.seed(123)
+index_train <- createDataPartition(datos_modelo_completo$depresion, p = 0.7, list = FALSE)
+train_data <- datos_modelo_completo[index_train,]
+test_data <- datos_modelo_completo[-index_train,]
+
+# Verificar distribución en conjuntos de entrenamiento y prueba
+print("Distribución en conjunto de entrenamiento:")
+print(table(train_data$depresion))
+print("Distribución en conjunto de prueba:")
+print(table(test_data$depresion))
+
+# Configurar control de entrenamiento con validación cruzada estratificada
+ctrl <- trainControl(
+    method = "repeatedcv",
+    number = 5,
+    repeats = 3,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    sampling = "down"  # Usar down-sampling en lugar de SMOTE
+)
+
+# Modelo 1: Random Forest con hiperparámetros optimizados
+set.seed(123)
+modelo_rf <- train(
+    depresion ~ .,
+    data = train_data,
+    method = "rf",
+    trControl = ctrl,
+    metric = "ROC",
+    tuneLength = 10
+)
+
+# Modelo 2: Árbol de Decisión con hiperparámetros optimizados
+set.seed(123)
+modelo_tree <- train(
+    depresion ~ .,
+    data = train_data,
+    method = "rpart",
+    trControl = ctrl,
+    metric = "ROC",
+    tuneLength = 10
+)
+
+# Evaluar modelos en conjunto de prueba
+pred_rf <- predict(modelo_rf, test_data)
+pred_tree <- predict(modelo_tree, test_data)
+
+# Métricas para Random Forest
+cm_rf <- confusionMatrix(pred_rf, test_data$depresion)
+print("Métricas para Random Forest en datos de prueba:")
+print(cm_rf)
+
+# Métricas para Árbol de Decisión
+cm_tree <- confusionMatrix(pred_tree, test_data$depresion)
+print("Métricas para Árbol de Decisión en datos de prueba:")
+print(cm_tree)
+
+# Curvas ROC en datos de prueba
+pred_rf_prob <- predict(modelo_rf, test_data, type = "prob")
+roc_rf <- roc(test_data$depresion, pred_rf_prob[,"Si"])
+auc_rf <- auc(roc_rf)
+
+pred_tree_prob <- predict(modelo_tree, test_data, type = "prob")
+roc_tree <- roc(test_data$depresion, pred_tree_prob[,"Si"])
+auc_tree <- auc(roc_tree)
+
+# Graficar curvas ROC
+plot(roc_rf, main = "Curvas ROC en datos de prueba", col = "blue")
+lines(roc_tree, col = "red")
+legend("bottomright", 
+       legend = c(paste("Random Forest (AUC =", round(auc_rf, 3), ")"),
+                 paste("Árbol de Decisión (AUC =", round(auc_tree, 3), ")")),
+       col = c("blue", "red"),
+       lty = 1)
+
+# Importancia de variables para Random Forest
+print("Importancia de variables en Random Forest:")
+varImp(modelo_rf)
+
+# Comparación final de modelos
+resultados <- data.frame(
+    Modelo = c("Random Forest", "Árbol de Decisión"),
+    Sensibilidad = c(cm_rf$byClass["Sensitivity"], cm_tree$byClass["Sensitivity"]),
+    Especificidad = c(cm_rf$byClass["Specificity"], cm_tree$byClass["Specificity"]),
+    VPP = c(cm_rf$byClass["Pos Pred Value"], cm_tree$byClass["Pos Pred Value"]),
+    Exactitud = c(cm_rf$overall["Accuracy"], cm_tree$overall["Accuracy"]),
+    AUC = c(auc_rf, auc_tree)
+)
+
+print("\nComparación final de modelos en datos de prueba:")
+print(resultados)
+```
+
+## 6. Conclusiones
+
+```{r conclusiones}
+
+output2 <- c(
+
+  "\nResultados de los Modelos Predictivos:\n",
+  "Análisis por métrica\n\n",
+
+  "Sensibilidad (Recall):\n\n",
+  "Random Forest: 68.12%. Este modelo detecta correctamente la mayoría de los casos positivos (es decir, individuos con depresión). Sin embargo, deja escapar alrededor del 31.88% de los casos positivos.\n\n",
+  "Árbol de Decisión: 57.64%. Tiene un peor desempeño en la detección de casos positivos comparado con Random Forest.\n\n",
+  "Conclusión: Random Forest es superior en identificar casos positivos.\n\n",
+
+  "Especificidad:\n\n",
+  "Random Forest: 43.27%. Este modelo identifica correctamente a los casos negativos con una precisión limitada.\n\n",
+  "Árbol de Decisión: 54.88%. Muestra mejor capacidad para identificar correctamente a los casos negativos.\n\n",
+  "Conclusión: El Árbol de Decisión supera a Random Forest en esta métrica.\n\n",
+
+  "Valor Predictivo Positivo (VPP):\n\n",
+  "Random Forest: 31.64%. De todos los casos que predice como positivos, solo el 31.64% son verdaderos positivos.\n\n",
+  "Árbol de Decisión: 33.00%. Tiene un desempeño ligeramente mejor en este aspecto.\n\n",
+  "Conclusión: Ambos modelos tienen limitaciones en la predicción positiva, aunque el Árbol de Decisión es marginalmente mejor.\n\n",
+
+  "Exactitud:\n\n",
+  "Random Forest: 50.18%. Este modelo tiene un desempeño cercano al azar en la clasificación general.\n\n",
+  "Árbol de Decisión: 55.65%. Supera ligeramente a Random Forest en esta métrica.\n\n",
+  "Conclusión: Ninguno de los modelos tiene un desempeño excelente, pero el Árbol de Decisión es marginalmente mejor en exactitud.\n\n",
+
+  "AUC (Área bajo la curva ROC):\n\n",
+  "Random Forest: 59.31%. Tiene un desempeño aceptable pero limitado en términos de discriminación entre clases positivas y negativas.\n\n",
+  "Árbol de Decisión: 55.65%. Tiene un desempeño inferior a Random Forest, con una discriminación cercana al azar.\n\n",
+  "Conclusión: Random Forest tiene una mejor capacidad general para distinguir entre positivos y negativos.\n\n",
+
+  "Consideraciones y Limitaciones:\n",
+  "  - Desbalance de Clases: mayor proporción de 'No' que de 'Sí', afectando el desempeño de los modelos.\n",
+  "  - Calidad de datos: datos faltantes impactan la representatividad, especialmente en variables como consumo de alcohol.\n",
+  "  - Selección de Variables: se recomienda análisis de correlación para mejorar la calidad del modelo.\n",
+  "  - Validación Cruzada: es crucial que el conjunto de prueba sea representativo y mantenga la distribución de clases.\n\n",
+
+  "Mejoras Futuras:\n",
+  "  - Exploración de Otros Modelos: probar otros algoritmos de aprendizaje automático (SVM, XGBoost, etc.).\n",
+  "  - Análisis de Importancia de Variables: investigar qué variables influyen en la predicción de la depresión.\n",
+  "  - Recoger Más Datos: recolectar más datos para mejorar la robustez y capacidad de generalización del modelo.\n\n",
+
+  "Conclusiones generales:\n",
+  "  - Los modelos predictivos desarrollados a partir de la encuesta ENSSEX 2022-2023 brindan información valiosa sobre la depresión en la población.\n",
+  "  - Se requiere un mayor esfuerzo para mejorar la precisión de la identificación de casos reales.\n",
+  "  - La colaboración entre expertos en epidemiología y data science puede facilitar el desarrollo de modelos más robustos para políticas públicas en salud.\n"
+)
+
+cat(output2, sep = "")
+
+
+```
